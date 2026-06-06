@@ -69,9 +69,21 @@ async fn main() -> Result<()> {
             }
             // 2. 将宿主人类敲击的原生按键（方向键、快捷键）完全透传给 PTY
             Some(bytes) = rx.recv() => {
+                if bytes.contains(&3) {
+                    // Ctrl+C: 拦截中断信号，强制中止底层 PTY 并退出
+                    println!("^C");
+                    session.kill()?;
+                    break;
+                }
+                if bytes.contains(&4) {
+                    // Ctrl+D: 拦截 EOF 信号，强制中止底层 PTY 并退出
+                    session.kill()?;
+                    break;
+                }
                 let input_str = String::from_utf8_lossy(&bytes);
                 session.write_input(&input_str, false)?;
             }
         }
     }
+    Ok(())
 }
