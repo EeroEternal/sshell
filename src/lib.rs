@@ -65,7 +65,7 @@ impl StructuredShell {
     }
 
     /// 启动 PTY 并开启“双轨捕获 (Dual-Track)”后台任务
-    pub fn spawn_pty(&self, cmd: &str) -> Result<PtySession> {
+    pub fn spawn_pty(&self, raw_cmd: &str) -> Result<PtySession> {
         let pty_system = native_pty_system();
         
         // 1. 创建底层 PTY 对
@@ -76,11 +76,15 @@ impl StructuredShell {
             pixel_height: 0,
         })?;
 
-        let command = CommandBuilder::new(cmd);
+        // 【关键修复】：调用 API 优先拦截器，自动追加 JSON 等结构化参数
+        let adapted_cmd = adapters::CommandAdapter::adapt(raw_cmd);
+
+        let command = CommandBuilder::new(&adapted_cmd);
         
         // 2. 挂载子进程
         let child = pair.slave.spawn_command(command)?;
-        let _ = self.event_tx.send(ShellEvent::CommandStart(cmd.to_string()));
+        
+        // 我们不再发出模拟的 Start 事件，而是交给底层的 Hook 去解析真实的启动信号
         
         // 3. 剥离 Master 读写句柄
         let master_reader = pair.master.try_clone_reader()?;
@@ -88,7 +92,6 @@ impl StructuredShell {
         let event_tx_clone = self.event_tx.clone();
 
         // 4. 后台任务：持久化抓取输出（机器轨 Shadow Stream）
-        // 这里使用 std::thread 避免阻塞 tokio 异步环境的 worker
         std::thread::spawn(move || {
             let mut reader = master_reader;
             let mut buf = [0u8; 4096];
@@ -96,14 +99,21 @@ impl StructuredShell {
                 match reader.read(&mut buf) {
                     Ok(n) if n > 0 => {
                         let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                        // 无论前端是否开启了 TUI UI，旁路持续搜集并派发输出事件
-                        let _ = event_tx_clone.send(ShellEvent::OutputChunk(chunk));
+                        
+                        // 发送原始抓取事件供上层选择性消费
+                        let _ = event_tx_clone.send(ShellEvent::OutputChunk(chunk.clone()));
+
+                        // 【关键修复】：调用 Semantic Hook 解析器，从底层输出中抽取真实生命周期事件并广播
+                        let semantic_events = hooks::SemanticHookParser::parse_chunk(&chunk);
+                        for event in semantic_events {
+                            let _ = event_tx_clone.send(event);
+                        }
                     }
                     Ok(_) => break, // EOF
                     Err(_) => break,
                 }
             }
-            // 简单模拟进程退出事件 (实际需配合子进程 wait)
+            // 兜底的退出事件
             let _ = event_tx_clone.send(ShellEvent::CommandEnd(0));
         });
 
