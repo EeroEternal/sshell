@@ -79,7 +79,9 @@ impl StructuredShell {
         // 【关键修复】：调用 API 优先拦截器，自动追加 JSON 等结构化参数
         let adapted_cmd = adapters::CommandAdapter::adapt(raw_cmd);
 
-        let command = CommandBuilder::new(&adapted_cmd);
+        let mut command = CommandBuilder::new("bash");
+        command.arg("-c");
+        command.arg(&adapted_cmd);
         
         // 2. 挂载子进程
         let child = pair.slave.spawn_command(command)?;
